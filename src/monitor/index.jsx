@@ -4,7 +4,7 @@ import {
 } from '@trendr/core'
 import {
   sessions, servers, buffers,
-  serverPid, isControllable, onEvent,
+  serverPid, serverInfo, isControllable, onEvent,
   writeStdin, killSession, launchSession, fetchScrollback,
 } from './store.js'
 import { ACCENT, FG, FG_SOFT, MUTED, FAINT, PANEL_BG, SELECT_BG, RED, AMBER } from './theme.js'
@@ -31,6 +31,28 @@ function controllableSources() {
   return Object.keys(servers()).filter(isControllable)
 }
 
+function buildRows() {
+  const rows = []
+  const bySource = new Map()
+  for (const s of sessions()) {
+    if (!bySource.has(s._source)) bySource.set(s._source, [])
+    bySource.get(s._source).push(s)
+  }
+  const sources = Object.keys(servers()).sort((a, b) => Number(serverPid(a)) - Number(serverPid(b)))
+  for (const source of sources) {
+    rows.push({ kind: 'server', source })
+    for (const s of bySource.get(source) || []) rows.push({ kind: 'session', session: s })
+  }
+  return rows
+}
+
+function nearestSession(rows, from, dir) {
+  for (let i = from; i >= 0 && i < rows.length; i += dir) {
+    if (rows[i].kind === 'session') return i
+  }
+  return -1
+}
+
 function App() {
   const [selected, setSelected] = createSignal(0)
   const [mode, setMode] = createSignal('browse')
@@ -48,10 +70,32 @@ function App() {
     render: (message) => <text style={{ bg: ACCENT, color: 'black', bold: true }}>{` ${message} `}</text>,
   })
 
+  const rows = () => buildRows()
+
+  const moveCursor = (next) => {
+    const list = rows()
+    if (list.length === 0) return
+    const clamped = Math.max(0, Math.min(list.length - 1, next))
+    if (list[clamped].kind === 'session') return setSelected(clamped)
+    const dir = clamped >= selected() ? 1 : -1
+    const target = nearestSession(list, clamped, dir)
+    if (target !== -1) return setSelected(target)
+    const fallback = nearestSession(list, clamped, -dir)
+    if (fallback !== -1) setSelected(fallback)
+  }
+
   const current = () => {
-    const list = sessions()
-    if (list.length === 0) return null
-    return list[Math.min(selected(), list.length - 1)]
+    const row = rows()[selected()]
+    return row?.kind === 'session' ? row.session : null
+  }
+
+  {
+    const list = rows()
+    if (list.length > 0 && list[selected()]?.kind !== 'session') {
+      const fixed = nearestSession(list, Math.min(selected(), list.length - 1), 1)
+      const target = fixed !== -1 ? fixed : nearestSession(list, list.length - 1, -1)
+      if (target !== -1 && target !== selected()) setSelected(target)
+    }
   }
 
   const currentBuffer = () => {
@@ -99,8 +143,9 @@ function App() {
   const openLaunch = () => {
     const candidates = controllableSources()
     if (candidates.length === 0) return toast('no controllable servers · restart them on 1.2+')
-    const s = current()
-    const preferred = s && isControllable(s._source) ? s._source : candidates[0]
+    const row = rows()[selected()]
+    const rowSource = row ? (row.kind === 'server' ? row.source : row.session._source) : null
+    const preferred = rowSource && isControllable(rowSource) ? rowSource : candidates[0]
     setLaunchTarget(preferred)
     setMode('launch')
   }
@@ -170,15 +215,17 @@ function App() {
       <Header />
       <box style={{ flexDirection: 'row', flexGrow: 1, paddingX: 2, gap: 2, marginTop: 1 }}>
         <box style={{ flexDirection: 'column', width: 44 }}>
-          {sessions().length === 0
+          {rows().length === 0
             ? <EmptyList />
             : <List
-                items={sessions()}
+                items={rows()}
                 selected={selected()}
-                onSelect={setSelected}
+                onSelect={moveCursor}
                 focused={mode() === 'browse'}
                 scrolloff={2}
-                renderItem={(item, ctx) => <SessionRow session={item} ctx={ctx} />}
+                renderItem={(item, ctx) => item.kind === 'server'
+                  ? <ServerRow source={item.source} />
+                  : <SessionRow session={item.session} ctx={ctx} />}
               />}
         </box>
         <box style={{ flexDirection: 'column', flexGrow: 1, bg: PANEL_BG, paddingX: 1 }}>
@@ -212,18 +259,26 @@ function Header() {
   )
 }
 
-function EmptyList() {
-  const total = Object.keys(servers()).length
+function ServerRow({ source }) {
+  const control = isControllable(source)
+  const version = serverInfo(source)?.version
 
   return (
+    <box style={{ flexDirection: 'row', paddingX: 1 }}>
+      <text style={{ color: control ? ACCENT : FAINT }}>{control ? '▪ ' : '▫ '}</text>
+      <text style={{ color: MUTED }}>{`srv ${serverPid(source)}`}</text>
+      <text style={{ color: FAINT }}>{control ? `  ${version || ''}` : '  ro'}</text>
+    </box>
+  )
+}
+
+function EmptyList() {
+  return (
     <box style={{ flexDirection: 'column', marginTop: 1 }}>
-      <text style={{ color: FAINT }}>no sessions yet</text>
-      <text style={{ color: FAINT }}>agents create them with the launch tool</text>
-      <box style={{ flexDirection: 'row', marginTop: 1 }}>
-        {total === 0
-          ? <Spinner color={MUTED} label="waiting for servers..." />
-          : <text style={{ color: MUTED }}>{`▪ ${total} server${total === 1 ? '' : 's'} connected`}</text>}
+      <box style={{ flexDirection: 'row' }}>
+        <Spinner color={MUTED} label="waiting for servers..." />
       </box>
+      <text style={{ color: FAINT }}>servers appear here when an MCP client starts one</text>
     </box>
   )
 }
@@ -234,14 +289,13 @@ function SessionRow({ session, ctx }) {
   const dot = session.exited ? '▫ ' : '▪ '
   const dotColor = fg || (session.exited ? FAINT : ACCENT)
   const meta = [
-    `srv ${serverPid(session._source)}`,
-    isControllable(session._source) ? null : 'ro',
+    session.exited ? `exit ${session.exitCode}` : null,
     timeAgo(session.createdAt),
   ].filter(Boolean).join(' · ')
 
   return (
     <box style={{ flexDirection: 'row', bg, paddingX: 1 }}>
-      <text style={{ color: dotColor }}>{dot}</text>
+      <text style={{ color: dotColor }}>{`  ${dot}`}</text>
       <box style={{ flexGrow: 1, height: 1 }}>
         <text style={{ overflow: 'truncate', color: fg || (session.exited ? FG_SOFT : FG) }}>
           {shortCommand(session.command)}
