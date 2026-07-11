@@ -1,6 +1,6 @@
 {
   "name": "tui-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "main": "src/server.js",
   "bin": {
@@ -16,7 +16,7 @@
     "test": "node --test 'test/*.test.js'",
     "build": "node build.js",
     "prepublishOnly": "npm run build",
-    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null; true"
+    "postinstall": "node -e \"const fs=require('fs'),path=require('path');try{const p=path.join(path.dirname(require.resolve('node-pty/package.json')),'prebuilds');for(const d of fs.readdirSync(p)){try{fs.chmodSync(path.join(p,d,'spawn-helper'),0o755)}catch{}}}catch{}\""
   },
   "keywords": [],
   "author": "",

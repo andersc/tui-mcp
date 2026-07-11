@@ -5,6 +5,28 @@ const { Terminal } = xterm
 import { renderToPng, renderToText, renderToAnsi, renderScrollback, readRegion } from './renderer.js'
 import { resolveKeys, buildMouseSequence } from './keys.js'
 import { EventEmitter } from 'events'
+import { createRequire } from 'module'
+import fs from 'fs'
+import path from 'path'
+
+// npm strips the exec bit from node-pty's prebuilt spawn-helper, and install
+// scripts don't always run (npx caches, --ignore-scripts), so restore it here
+function fixSpawnHelperMode() {
+  if (process.platform === 'win32') return
+  try {
+    const require = createRequire(import.meta.url)
+    const prebuilds = path.join(path.dirname(require.resolve('node-pty/package.json')), 'prebuilds')
+    for (const entry of fs.readdirSync(prebuilds)) {
+      const helper = path.join(prebuilds, entry, 'spawn-helper')
+      try {
+        const mode = fs.statSync(helper).mode
+        if (!(mode & 0o111)) fs.chmodSync(helper, mode | 0o755)
+      } catch {}
+    }
+  } catch {}
+}
+
+fixSpawnHelperMode()
 
 export const events = new EventEmitter()
 
