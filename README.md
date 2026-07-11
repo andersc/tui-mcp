@@ -78,10 +78,11 @@ Session list on the left, live ANSI-rendered terminal preview on the right. The 
 
 Keys:
 
-- `j/k` or arrows to move, `g/G` for top/bottom, mouse click and scroll also work
-- `enter` attaches to the selected session - everything you type passes through to its pty, `ctrl+\` detaches
+- `j/k` or arrows to move through servers and their sessions, `g/G` for top/bottom, mouse click and scroll also work
+- `enter` on a session attaches - everything you type passes through to its pty, `ctrl+\` detaches
+- `enter` on a server opens the launch panel targeting it
 - `s` fetches the session's full scrollback into a scrollable view, `esc` returns to live
-- `l` launches a new session on a connected server (`ctrl+s` cycles the target server)
+- `l` launches a new session on the selected row's server (`ctrl+s` cycles the target)
 - `x` twice within 3 seconds kills the selected session
 - `q` quits
 

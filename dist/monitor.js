@@ -2562,12 +2562,6 @@ function buildRows() {
   }
   return rows;
 }
-function nearestSession(rows, from, dir) {
-  for (let i = from; i >= 0 && i < rows.length; i += dir) {
-    if (rows[i].kind === "session") return i;
-  }
-  return -1;
-}
 function App() {
   const [selected, setSelected] = createSignal(0);
   const [mode, setMode] = createSignal("browse");
@@ -2586,26 +2580,13 @@ function App() {
   const moveCursor = (next) => {
     const list = rows();
     if (list.length === 0) return;
-    const clamped = Math.max(0, Math.min(list.length - 1, next));
-    if (list[clamped].kind === "session") return setSelected(clamped);
-    const dir = clamped >= selected() ? 1 : -1;
-    const target = nearestSession(list, clamped, dir);
-    if (target !== -1) return setSelected(target);
-    const fallback = nearestSession(list, clamped, -dir);
-    if (fallback !== -1) setSelected(fallback);
+    setSelected(Math.max(0, Math.min(list.length - 1, next)));
   };
+  const currentRow = () => rows()[Math.min(selected(), Math.max(0, rows().length - 1))];
   const current = () => {
-    const row = rows()[selected()];
+    const row = currentRow();
     return row?.kind === "session" ? row.session : null;
   };
-  {
-    const list = rows();
-    if (list.length > 0 && list[selected()]?.kind !== "session") {
-      const fixed = nearestSession(list, Math.min(selected(), list.length - 1), 1);
-      const target = fixed !== -1 ? fixed : nearestSession(list, list.length - 1, -1);
-      if (target !== -1 && target !== selected()) setSelected(target);
-    }
-  }
   const currentBuffer = () => {
     const s = current();
     return s ? buffers()[s._key] || "" : "";
@@ -2643,14 +2624,23 @@ function App() {
       toast(`scrollback failed \xB7 ${e.message}`);
     }
   };
+  const rowSource = () => {
+    const row = currentRow();
+    return row ? row.kind === "server" ? row.source : row.session._source : null;
+  };
   const openLaunch = () => {
     const candidates = controllableSources();
     if (candidates.length === 0) return toast("no controllable servers \xB7 restart them on 1.2+");
-    const row = rows()[selected()];
-    const rowSource = row ? row.kind === "server" ? row.source : row.session._source : null;
-    const preferred = rowSource && isControllable(rowSource) ? rowSource : candidates[0];
-    setLaunchTarget(preferred);
+    const source = rowSource();
+    setLaunchTarget(source && isControllable(source) ? source : candidates[0]);
     setMode("launch");
+  };
+  const activate = () => {
+    const row = currentRow();
+    if (!row) return;
+    if (row.kind === "session") return attach();
+    if (!isControllable(row.source)) return toast(`srv ${serverPid(row.source)} is read-only \xB7 restart it on 1.2+`);
+    openLaunch();
   };
   const cycleLaunchTarget = () => {
     const candidates = controllableSources();
@@ -2697,7 +2687,7 @@ function App() {
       if (e.key === "escape" || e.key === "q") setMode("browse");
       return;
     }
-    if (e.key === "return") attach();
+    if (e.key === "return") activate();
     if (e.key === "s") openScrollback();
     if (e.key === "l") openLaunch();
     if (e.key === "x") armKill();
@@ -2715,13 +2705,13 @@ function App() {
           onSelect: moveCursor,
           focused: mode() === "browse",
           scrolloff: 2,
-          renderItem: (item, ctx) => item.kind === "server" ? /* @__PURE__ */ jsx(ServerRow, { source: item.source }) : /* @__PURE__ */ jsx(SessionRow, { session: item.session, ctx })
+          renderItem: (item, ctx) => item.kind === "server" ? /* @__PURE__ */ jsx(ServerRow, { source: item.source, ctx }) : /* @__PURE__ */ jsx(SessionRow, { session: item.session, ctx })
         }
       ) }),
-      /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", flexGrow: 1, bg: PANEL_BG, paddingX: 1 }, children: [
+      /* @__PURE__ */ jsx("box", { style: { flexDirection: "column", flexGrow: 1, bg: PANEL_BG, paddingX: 1 }, children: currentRow()?.kind === "server" && mode() !== "scrollback" ? /* @__PURE__ */ jsx(ServerCard, { source: currentRow().source }) : /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", flexGrow: 1 }, children: [
         /* @__PURE__ */ jsx(PreviewHeader, { session: current(), mode: mode() }),
         mode() === "scrollback" ? /* @__PURE__ */ jsx(ScrollableText, { content: scrollback(), focused: true, scrollbar: true, wrap: false }) : /* @__PURE__ */ jsx(LivePreview, { session: current(), content: currentBuffer() })
-      ] })
+      ] }) })
     ] }),
     mode() === "launch" && /* @__PURE__ */ jsx(LaunchPanel, { target: launchTarget(), onSubmit: submitLaunch, onCancel: () => setMode("browse") }),
     /* @__PURE__ */ jsx(Footer, { mode: mode() })
@@ -2741,13 +2731,29 @@ function Header() {
     readOnly > 0 && /* @__PURE__ */ jsx("text", { style: { color: AMBER }, children: ` \xB7 ${readOnly} read-only` })
   ] });
 }
-function ServerRow({ source }) {
+function ServerRow({ source, ctx }) {
+  const bg = ctx.selected ? ctx.focused ? ACCENT : SELECT_BG : null;
+  const fg = ctx.selected ? "black" : null;
   const control = isControllable(source);
   const version = serverInfo(source)?.version;
-  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 1 }, children: [
-    /* @__PURE__ */ jsx("text", { style: { color: control ? ACCENT : FAINT }, children: control ? "\u25AA " : "\u25AB " }),
-    /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: `srv ${serverPid(source)}` }),
-    /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: control ? `  ${version || ""}` : "  ro" })
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", bg, paddingX: 1 }, children: [
+    /* @__PURE__ */ jsx("text", { style: { color: fg || (control ? ACCENT : FAINT) }, children: control ? "\u25AA " : "\u25AB " }),
+    /* @__PURE__ */ jsx("text", { style: { color: fg || MUTED }, children: `srv ${serverPid(source)}` }),
+    /* @__PURE__ */ jsx("text", { style: { color: fg || FAINT }, children: control ? `  ${version || ""}` : "  ro" })
+  ] });
+}
+function ServerCard({ source }) {
+  const control = isControllable(source);
+  const info = serverInfo(source) || {};
+  const count = sessions().filter((s) => s._source === source).length;
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column" }, children: [
+    /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row" }, children: [
+      /* @__PURE__ */ jsx("text", { style: { color: ACCENT, bold: true }, children: `srv ${serverPid(source)}` }),
+      /* @__PURE__ */ jsx(Spacer, {}),
+      control ? /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: `tui-mcp ${info.version || ""}` }) : /* @__PURE__ */ jsx("text", { style: { color: AMBER }, children: "read-only \xB7 restart it on 1.2+" })
+    ] }),
+    /* @__PURE__ */ jsx("box", { style: { marginTop: 1 }, children: /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: `${count} session${count === 1 ? "" : "s"}` }) }),
+    control && /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: "enter or l launches a session on this server" })
   ] });
 }
 function EmptyList() {
