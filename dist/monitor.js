@@ -2631,7 +2631,7 @@ function App() {
   const armKill = () => {
     const s = current();
     if (!s) return;
-    if (!s.exited && !requireControl(s)) return;
+    if (!requireControl(s)) return;
     const armed = refs.killArm;
     if (!armed || armed.key !== s._key || Date.now() - armed.at > KILL_ARM_MS) {
       refs.killArm = { key: s._key, at: Date.now() };
