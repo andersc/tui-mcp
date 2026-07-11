@@ -12,14 +12,17 @@ if (process.argv[2] === 'monitor') {
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { createRequire } from 'module'
 import { z } from 'zod'
 import * as session from './session.js'
 import { startIpc } from './ipc.js'
 
 startIpc()
 
+const pkg = createRequire(import.meta.url)('../package.json')
+
 const server = new McpServer(
-  { name: 'tui-mcp', version: '1.1.0' },
+  { name: 'tui-mcp', version: pkg.version },
   { capabilities: { logging: {} } }
 )
 

@@ -97,6 +97,7 @@ export function launch(command, { cols = 80, rows = 24, cwd, env } = {}) {
   const session = {
     id,
     command,
+    createdAt: created,
     pid: p.pid,
     pty: p,
     term,
@@ -194,6 +195,7 @@ function sessionInfo(s) {
   return {
     sessionId: s.id,
     command: s.command,
+    createdAt: s.createdAt,
     pid: s.pid,
     cols: s.cols,
     rows: s.rows,

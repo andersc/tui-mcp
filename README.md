@@ -68,13 +68,24 @@ Most MCP servers wrap one specific tool or API. tui-mcp wraps the terminal itsel
 
 ## Monitor
 
-Watch all active sessions in real-time from your terminal:
+Watch and control all active sessions from your terminal:
 
 ```bash
 npx tui-mcp monitor
 ```
 
-Session list on the left, live ANSI-rendered terminal preview on the right. j/k to navigate sessions, Enter to toggle fullscreen, q to quit. Requires the MCP server to be running.
+Session list on the left, live ANSI-rendered terminal preview on the right. The monitor discovers every running tui-mcp server on the machine and aggregates their sessions.
+
+Keys:
+
+- `j/k` or arrows to move, `g/G` for top/bottom, mouse click and scroll also work
+- `enter` attaches to the selected session - everything you type passes through to its pty, `ctrl+\` detaches
+- `s` fetches the session's full scrollback into a scrollable view, `esc` returns to live
+- `l` launches a new session on a connected server (`ctrl+s` cycles the target server)
+- `x` twice within 3 seconds kills the selected session
+- `q` quits
+
+Attach, launch, kill, and scrollback need the server to be 1.2 or newer; sessions on older servers are marked `ro` (read-only) and can still be watched.
 
 ## How it works
 

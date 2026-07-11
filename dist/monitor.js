@@ -1148,14 +1148,25 @@ var lastFrameTimestamp = 0;
 function getContext() {
   return activeContext;
 }
+var DEFAULT_CURSOR = { blink: false, rate: 530, style: "block" };
 var DEFAULT_THEME = { accent: "cyan" };
 function getTheme() {
   return activeContext?.theme ?? DEFAULT_THEME;
+}
+function getCursor(propCursor) {
+  const themeCursor = activeContext?.theme?.cursor;
+  if (!propCursor && !themeCursor) return DEFAULT_CURSOR;
+  if (propCursor === true) return { ...DEFAULT_CURSOR, blink: true, ...themeCursor };
+  return { ...DEFAULT_CURSOR, ...themeCursor, ...propCursor };
 }
 function getInstanceLayout() {
   if (!currentHookOwner) return { x: 0, y: 0, width: 0, height: 0 };
   if (!currentHookOwner.layout) currentHookOwner.layout = { x: 0, y: 0, width: 0, height: 0 };
   return currentHookOwner.layout;
+}
+function registerOverlay(element, { backdrop, fullscreen } = {}) {
+  if (!currentHookOwner) return;
+  overlays.push({ element, owner: currentHookOwner, backdrop, fullscreen });
 }
 var BORDER_CHARS = {
   single: { tl: "\u250C", tr: "\u2510", bl: "\u2514", br: "\u2518", h: "\u2500", v: "\u2502", tDown: "\u252C", tUp: "\u2534", tRight: "\u251C", tLeft: "\u2524" },
@@ -1747,6 +1758,15 @@ function useMouse(handler) {
   });
   ref.current = handler;
 }
+function useInterval(fn, ms) {
+  const ref = registerHook(() => {
+    const state = { current: fn };
+    const id = setInterval(() => state.current(), ms);
+    onCleanup(() => clearInterval(id));
+    return state;
+  });
+  ref.current = fn;
+}
 function useLayout() {
   return getInstanceLayout();
 }
@@ -1778,6 +1798,54 @@ function useScrollDrag({ barX, barY, thumbHeight, trackHeight, maxOffset, scroll
     }
   });
 }
+function useCursor(propCursor, focused) {
+  const config = getCursor(propCursor);
+  const state = registerHook(() => {
+    const [visible, setVisible] = createSignalRaw(true);
+    let id = null;
+    function start(rate) {
+      stop();
+      id = setInterval(() => setVisible((v) => !v), rate);
+    }
+    function stop() {
+      if (id !== null) {
+        clearInterval(id);
+        id = null;
+      }
+      setVisible(true);
+    }
+    onCleanup(stop);
+    return { visible, setVisible, start, stop, blinking: false, rate: 0 };
+  });
+  const shouldBlink = config.blink && focused;
+  if (shouldBlink && (!state.blinking || state.rate !== config.rate)) {
+    state.start(config.rate);
+    state.blinking = true;
+    state.rate = config.rate;
+  } else if (!shouldBlink && state.blinking) {
+    state.stop();
+    state.blinking = false;
+  }
+  if (!shouldBlink) state.setVisible(true);
+  function reset() {
+    if (!state.blinking) return;
+    state.setVisible(true);
+    state.start(config.rate);
+  }
+  function cursorStyle() {
+    if (!focused || !state.visible()) return null;
+    const s = {};
+    if (config.color) s.color = config.color;
+    if (config.bg) s.bg = config.bg;
+    if (!config.color && !config.bg) s.inverse = true;
+    if (config.style === "underline") {
+      s.underline = true;
+      delete s.inverse;
+    }
+    return s;
+  }
+  return { config, visible: state.visible, cursorStyle, reset };
+}
 
 // node_modules/@trendr/core/jsx-runtime.js
 function jsx(type, props, key) {
@@ -1788,6 +1856,141 @@ var jsxs = jsx;
 // node_modules/@trendr/core/src/components.js
 function Spacer() {
   return jsx("box", { style: { flexGrow: 1 } });
+}
+
+// node_modules/@trendr/core/src/text-input.js
+var BOX = { flexDirection: "row", height: 1, minHeight: 1, flexGrow: 1 };
+function TextInput({ onSubmit, onCancel, onChange, placeholder, focused = true, initialValue, clearOnSubmit = false, cursor: cursorProp }) {
+  const init = initialValue ?? "";
+  const [value, setValue] = createSignal(init);
+  const [cursor, setCursor] = createSignal(init.length);
+  const layout = useLayout();
+  const { cursorStyle, reset: resetBlink } = useCursor(cursorProp, focused);
+  function update(v2, c2) {
+    setValue(v2);
+    setCursor(c2);
+    if (onChange) onChange(v2);
+  }
+  useInput((event) => {
+    if (!focused) return;
+    resetBlink();
+    const { key, raw, ctrl } = event;
+    const v2 = value();
+    const c2 = cursor();
+    if (key === "return") {
+      if (onSubmit) {
+        onSubmit(v2);
+        if (clearOnSubmit) update("", 0);
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (key === "escape") {
+      if (onCancel) {
+        onCancel();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (key === "backspace") {
+      if (c2 > 0) update(v2.slice(0, c2 - 1) + v2.slice(c2), c2 - 1);
+      event.stopPropagation();
+      return;
+    }
+    if (key === "delete") {
+      if (c2 < v2.length) update(v2.slice(0, c2) + v2.slice(c2 + 1), c2);
+      event.stopPropagation();
+      return;
+    }
+    if (key === "left") {
+      setCursor(Math.max(0, c2 - 1));
+      event.stopPropagation();
+      return;
+    }
+    if (key === "right") {
+      setCursor(Math.min(v2.length, c2 + 1));
+      event.stopPropagation();
+      return;
+    }
+    if (key === "home" || ctrl && raw === "") {
+      setCursor(0);
+      event.stopPropagation();
+      return;
+    }
+    if (key === "end" || ctrl && raw === "") {
+      setCursor(v2.length);
+      event.stopPropagation();
+      return;
+    }
+    if (ctrl && raw === "") {
+      update(v2.slice(c2), 0);
+      event.stopPropagation();
+      return;
+    }
+    if (ctrl && raw === "\v") {
+      update(v2.slice(0, c2), c2);
+      event.stopPropagation();
+      return;
+    }
+    if (ctrl && raw === "") {
+      const before2 = v2.slice(0, c2);
+      const after2 = v2.slice(c2);
+      const trimmed = before2.replace(/\S+\s*$/, "");
+      update(trimmed + after2, trimmed.length);
+      event.stopPropagation();
+      return;
+    }
+    if (!ctrl && raw.length === 1 && raw >= " ") {
+      update(v2.slice(0, c2) + raw + v2.slice(c2), c2 + raw.length);
+      event.stopPropagation();
+    }
+  });
+  const v = value();
+  const c = cursor();
+  const w = layout.width || 0;
+  const cs = cursorStyle();
+  if (!v && placeholder && !focused) {
+    return jsx("text", { style: { color: "gray", flexGrow: 1 }, children: placeholder });
+  }
+  if (!v && placeholder && focused) {
+    return jsxs("box", {
+      style: BOX,
+      children: [
+        jsx("text", { style: cs ? { ...cs, color: cs.color ?? "gray" } : { inverse: true, color: "gray" }, children: placeholder[0] }),
+        placeholder.length > 1 && jsx("text", { style: { color: "gray" }, children: placeholder.slice(1) })
+      ]
+    });
+  }
+  const contentWidth = v.length + 1;
+  const needsScroll = w > 0 && contentWidth > w;
+  if (!needsScroll) {
+    const cursorChar2 = v[c] || " ";
+    return jsxs("box", {
+      style: BOX,
+      children: [
+        v.slice(0, c) && jsx("text", { children: v.slice(0, c) }),
+        jsx("text", { style: cs ?? {}, children: cursorChar2 }),
+        v.slice(c + 1) && jsx("text", { children: v.slice(c + 1) })
+      ]
+    });
+  }
+  let scrollStart = 0;
+  if (c >= w) {
+    scrollStart = c - w + 1;
+  }
+  const visible = v.slice(scrollStart, scrollStart + w);
+  const cursorInView = c - scrollStart;
+  const before = visible.slice(0, cursorInView);
+  const cursorChar = visible[cursorInView] || " ";
+  const after = visible.slice(cursorInView + 1);
+  return jsxs("box", {
+    style: BOX,
+    children: [
+      before && jsx("text", { children: before }),
+      jsx("text", { style: cs ?? {}, children: cursorChar }),
+      after && jsx("text", { children: after })
+    ]
+  });
 }
 
 // node_modules/@trendr/core/src/list.js
@@ -1925,6 +2128,29 @@ function List({ items, selected: selectedProp, onSelect, renderItem, header, hea
   });
 }
 
+// node_modules/@trendr/core/src/spinner.js
+var VARIANTS = {
+  dots: ["\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"],
+  line: ["|", "/", "-", "\\"],
+  circle: ["\u25D0", "\u25D3", "\u25D1", "\u25D2"],
+  bounce: ["\u2801", "\u2802", "\u2804", "\u2802"],
+  arrow: ["\u2190", "\u2196", "\u2191", "\u2197", "\u2192", "\u2198", "\u2193", "\u2199"],
+  square: ["\u25F0", "\u25F3", "\u25F2", "\u25F1"],
+  star: ["\u2736", "\u2738", "\u2739", "\u273A", "\u2739", "\u2738"]
+};
+function Spinner({ label, color, interval = 80, variant = "dots", frames }) {
+  const { accent = "cyan" } = useTheme();
+  const c = color ?? accent;
+  const f = frames ?? VARIANTS[variant] ?? VARIANTS.dots;
+  const [frame, setFrame] = createSignal(0);
+  useInterval(() => setFrame((i) => (i + 1) % f.length), interval);
+  const children = [jsx("text", { style: { color: c }, children: f[frame()] })];
+  if (label != null) {
+    children.push(jsx("text", { children: ` ${label}` }));
+  }
+  return jsxs("box", { style: { flexDirection: "row" }, children });
+}
+
 // node_modules/@trendr/core/src/scrollable-text.js
 function ScrollableText({ content = "", focused = true, scrollOffset: offsetProp, onScroll, width: widthProp, scrollbar = false, wrap = true, thumbChar = "\u2588", trackChar = "\u2502" }) {
   const { accent = "cyan" } = useTheme();
@@ -2000,63 +2226,50 @@ function ScrollableText({ content = "", focused = true, scrollOffset: offsetProp
   return jsx("box", { style: { flexDirection: "column", flexGrow: 1 }, children });
 }
 
-// node_modules/@trendr/core/src/split-pane.js
-var DIVIDER_CHARS = {
-  single: { h: "\u2500", v: "\u2502" },
-  double: { h: "\u2550", v: "\u2551" },
-  round: { h: "\u2500", v: "\u2502" },
-  bold: { h: "\u2501", v: "\u2503" }
+// node_modules/@trendr/core/src/toast.js
+var POSITIONS = {
+  "top-left": { justifyContent: "flex-start", alignItems: "flex-start" },
+  "top-center": { justifyContent: "flex-start", alignItems: "center" },
+  "top-right": { justifyContent: "flex-start", alignItems: "flex-end" },
+  "center-left": { justifyContent: "center", alignItems: "flex-start" },
+  "center": { justifyContent: "center", alignItems: "center" },
+  "center-right": { justifyContent: "center", alignItems: "flex-end" },
+  "bottom-left": { justifyContent: "flex-end", alignItems: "flex-start" },
+  "bottom-center": { justifyContent: "flex-end", alignItems: "center" },
+  "bottom-right": { justifyContent: "flex-end", alignItems: "flex-end" }
 };
-function parseSize(s) {
-  if (typeof s === "number") return { type: "fixed", value: s };
-  const m = String(s).match(/^(\d*\.?\d+)fr$/);
-  return m ? { type: "fr", value: parseFloat(m[1]) } : { type: "fixed", value: parseInt(s) || 0 };
-}
-function sizeToStyle(size, isRow) {
-  const parsed = parseSize(size);
-  if (parsed.type === "fixed") return { [isRow ? "width" : "height"]: parsed.value };
-  return { flexGrow: parsed.value };
-}
-function SplitPane({ children, direction = "row", sizes: sizesProp, border = "single", borderColor, borderEdges, style }) {
-  const items = Array.isArray(children) ? children.filter((c) => c != null && c !== true && c !== false) : children ? [children] : [];
-  const n = items.length;
-  if (n === 0) return null;
-  const isRow = direction === "row";
-  const chars = DIVIDER_CHARS[border] ?? DIVIDER_CHARS.single;
-  const sizes = sizesProp ?? items.map(() => "1fr");
-  const elements = [];
-  for (let i = 0; i < n; i++) {
-    elements.push(
-      jsx("box", {
-        key: `p${i}`,
-        style: { ...sizeToStyle(sizes[i] ?? "1fr", isRow), flexDirection: "column" },
-        children: items[i]
-      })
-    );
-    if (i < n - 1) {
-      elements.push(
-        jsx("box", {
-          key: `d${i}`,
-          style: {
-            [isRow ? "width" : "height"]: 1,
-            texture: isRow ? chars.v : chars.h,
-            textureColor: borderColor,
-            _divider: isRow ? "vertical" : "horizontal"
-          }
-        })
-      );
-    }
+var nextId = 0;
+function useToast({ duration = 2e3, position = "bottom-right", margin = 1, render } = {}) {
+  const [items, setItems] = registerHook(() => createSignalRaw([]));
+  useInterval(() => {
+    const now = Date.now();
+    setItems((prev) => {
+      const next = prev.filter((t) => t.expires > now);
+      return next.length === prev.length ? prev : next;
+    });
+  }, 200);
+  function toast(message) {
+    const id = nextId++;
+    setItems((prev) => [...prev, { id, message, expires: Date.now() + duration }]);
   }
-  return jsx("box", {
-    style: {
-      ...style,
-      border: border || void 0,
-      borderColor,
-      borderEdges,
-      flexDirection: isRow ? "row" : "column"
-    },
-    children: elements
-  });
+  const list = items();
+  if (list.length > 0) {
+    const pos2 = POSITIONS[position] || POSITIONS["bottom-right"];
+    const overlay = jsx("box", {
+      style: {
+        width: "100%",
+        height: "100%",
+        flexDirection: "column",
+        padding: margin,
+        ...pos2
+      },
+      children: list.map(
+        (t) => render ? jsx("box", { key: t.id, children: render(t.message) }) : jsx("text", { key: t.id, style: { inverse: true }, children: ` ${t.message} ` })
+      )
+    });
+    registerOverlay(overlay, { fullscreen: true });
+  }
+  return toast;
 }
 
 // src/monitor/client.js
@@ -2067,6 +2280,7 @@ import os from "os";
 import { EventEmitter } from "events";
 var SOCK_DIR = path.join(os.homedir(), ".tui-mcp");
 var SCAN_MS = 2e3;
+var REQUEST_TIMEOUT_MS = 5e3;
 function pidFromSock(file) {
   const m = file.match(/^(\d+)\.sock$/);
   return m ? Number(m[1]) : null;
@@ -2082,6 +2296,8 @@ function isProcessAlive(pid) {
 function connect() {
   const emitter = new EventEmitter();
   const connections = /* @__PURE__ */ new Map();
+  const pending = /* @__PURE__ */ new Map();
+  let nextReqId = 1;
   let destroyed = false;
   let scanTimer = null;
   function scanAndConnect() {
@@ -2106,6 +2322,14 @@ function connect() {
     }
     scanTimer = setTimeout(scanAndConnect, SCAN_MS);
   }
+  function settleResult(msg) {
+    const req = pending.get(msg.reqId);
+    if (!req) return;
+    pending.delete(msg.reqId);
+    clearTimeout(req.timer);
+    if (msg.ok) req.resolve(msg.data);
+    else req.reject(new Error(msg.error || "request failed"));
+  }
   function connectOne(sockPath) {
     let buffer = "";
     const socket = net.createConnection(sockPath);
@@ -2118,6 +2342,10 @@ function connect() {
         buffer = buffer.slice(nl + 1);
         try {
           const msg = JSON.parse(line);
+          if (msg.type === "result") {
+            settleResult(msg);
+            continue;
+          }
           msg._source = sockPath;
           emitter.emit("message", msg);
         } catch {
@@ -2136,9 +2364,43 @@ function connect() {
     });
   }
   scanAndConnect();
+  emitter.send = (source, msg) => {
+    const socket = connections.get(source);
+    if (!socket) return false;
+    try {
+      socket.write(JSON.stringify(msg) + "\n");
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  emitter.request = (source, msg) => {
+    return new Promise((resolve, reject) => {
+      const socket = connections.get(source);
+      if (!socket) return reject(new Error("server not connected"));
+      const reqId = nextReqId++;
+      const timer = setTimeout(() => {
+        pending.delete(reqId);
+        reject(new Error("request timed out"));
+      }, REQUEST_TIMEOUT_MS);
+      pending.set(reqId, { resolve, reject, timer });
+      try {
+        socket.write(JSON.stringify({ ...msg, reqId }) + "\n");
+      } catch (e) {
+        pending.delete(reqId);
+        clearTimeout(timer);
+        reject(e);
+      }
+    });
+  };
   emitter.destroy = () => {
     destroyed = true;
     clearTimeout(scanTimer);
+    for (const req of pending.values()) {
+      clearTimeout(req.timer);
+      req.reject(new Error("client destroyed"));
+    }
+    pending.clear();
     for (const socket of connections.values()) {
       try {
         socket.destroy();
@@ -2150,203 +2412,390 @@ function connect() {
   return emitter;
 }
 
-// src/monitor/index.jsx
-var client = null;
-var wire = { onMessage: null, onConnected: null, onLost: null };
-function ensureClient() {
-  if (client) return;
-  client = connect();
-  client.on("message", (m) => wire.onMessage?.(m));
-  client.on("connected", (s) => wire.onConnected?.(s));
-  client.on("server_lost", (s) => wire.onLost?.(s));
-}
-var CYAN = "#00bcd4";
-var DIM2 = "#555555";
+// src/monitor/store.js
+var [sessions, setSessions] = createSignal([]);
+var [servers, setServers] = createSignal({});
+var [buffers, setBuffers] = createSignal({});
 function sessionKey(source, sessionId) {
   return `${source}:${sessionId}`;
 }
-function sourceLabel(source) {
-  return (source?.split("/").pop() || "?").replace(/\.sock$/, "");
+function serverPid(source) {
+  const m = (source || "").match(/(\d+)\.sock$/);
+  return m ? m[1] : "?";
 }
-function sortByPid(list) {
-  return [...list].sort((a, b) => a.pid - b.pid);
+function serverInfo(source) {
+  return servers()[source];
 }
-function upsertSession(list, session) {
-  const next = list.filter((s) => s._key !== session._key);
-  next.push(session);
-  return sortByPid(next);
+function isControllable(source) {
+  return serverInfo(source)?.caps?.includes("control") ?? false;
 }
-function App() {
-  const [sessions, setSessions] = createSignal([]);
-  const [sources, setSources] = createSignal([]);
-  const [selected, setSelected] = createSignal(0);
-  const [buffers, setBuffers] = createSignal({});
-  const [fullscreen, setFullscreen] = createSignal(false);
-  const rememberSource = (src) => {
-    if (!src) return;
-    setSources((prev) => prev.includes(src) ? prev : [...prev, src].sort());
-  };
-  const forgetSource = (src) => {
-    setSources((prev) => prev.filter((s) => s !== src));
-  };
-  ensureClient();
-  wire.onMessage = (msg) => {
-    const src = msg._source;
-    rememberSource(src);
-    if (msg.type === "sessions") {
-      setSessions((prev) => {
-        const other = prev.filter((s) => s._source !== src);
-        const incoming = msg.sessions.map((s) => ({ ...s, _source: src, _key: sessionKey(src, s.sessionId) }));
-        return sortByPid([...other, ...incoming]);
-      });
+function sortSessions(list) {
+  return [...list].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || a.pid - b.pid);
+}
+function decorate(source, s) {
+  return { ...s, _source: source, _key: sessionKey(source, s.sessionId) };
+}
+function rememberServer(source, info = {}) {
+  setServers((prev) => ({ ...prev, [source]: { ...prev[source], ...info } }));
+}
+function forgetServer(source) {
+  setServers((prev) => {
+    const next = { ...prev };
+    delete next[source];
+    return next;
+  });
+  setSessions((prev) => prev.filter((s) => s._source !== source));
+  setBuffers((prev) => {
+    const next = { ...prev };
+    for (const k of Object.keys(next)) {
+      if (k.startsWith(source + ":")) delete next[k];
     }
-    if (msg.type === "created") {
-      const s = { ...msg.session, _source: src, _key: sessionKey(src, msg.session.sessionId) };
-      setSessions((prev) => upsertSession(prev, s));
-    }
-    if (msg.type === "killed") {
-      const key = sessionKey(src, msg.sessionId);
-      setSessions((prev) => prev.filter((s) => s._key !== key));
-      setBuffers((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
-    }
-    if (msg.type === "exited") {
-      const key = sessionKey(src, msg.sessionId);
-      setSessions((prev) => prev.map(
-        (s) => s._key === key ? { ...s, exited: true, exitCode: msg.exitCode } : s
-      ));
-    }
-    if (msg.type === "buffer") {
-      const key = sessionKey(src, msg.sessionId);
-      setBuffers((prev) => ({ ...prev, [key]: msg.ansi }));
-    }
-  };
-  wire.onConnected = rememberSource;
-  wire.onLost = (src) => {
-    forgetSource(src);
-    setSessions((prev) => prev.filter((s) => s._source !== src));
+    return next;
+  });
+}
+var listeners = /* @__PURE__ */ new Set();
+function onEvent(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+function emit(event) {
+  for (const fn of listeners) fn(event);
+}
+var client = connect();
+client.on("connected", (source) => rememberServer(source));
+client.on("server_lost", (source) => forgetServer(source));
+client.on("message", (msg) => {
+  const source = msg._source;
+  rememberServer(source);
+  if (msg.type === "hello") {
+    rememberServer(source, { pid: msg.pid, version: msg.version, caps: msg.caps || [] });
+  }
+  if (msg.type === "sessions") {
+    setSessions((prev) => {
+      const other = prev.filter((s) => s._source !== source);
+      return sortSessions([...other, ...msg.sessions.map((s) => decorate(source, s))]);
+    });
+  }
+  if (msg.type === "created") {
+    setSessions((prev) => {
+      const rest = prev.filter((s) => s._key !== sessionKey(source, msg.session.sessionId));
+      return sortSessions([...rest, decorate(source, msg.session)]);
+    });
+    emit({ kind: "created", session: decorate(source, msg.session) });
+  }
+  if (msg.type === "killed") {
+    const key = sessionKey(source, msg.sessionId);
+    setSessions((prev) => prev.filter((s) => s._key !== key));
     setBuffers((prev) => {
       const next = { ...prev };
-      for (const k of Object.keys(next)) {
-        if (k.startsWith(src + ":")) delete next[k];
-      }
+      delete next[key];
       return next;
     });
-  };
-  useInput(({ key }) => {
-    if (key === "q") process.exit(0);
-    if (key === "return") setFullscreen((f) => !f);
-    if (key === "escape") setFullscreen(false);
+    emit({ kind: "killed", key });
+  }
+  if (msg.type === "exited") {
+    const key = sessionKey(source, msg.sessionId);
+    setSessions((prev) => prev.map(
+      (s) => s._key === key ? { ...s, exited: true, exitCode: msg.exitCode } : s
+    ));
+    emit({ kind: "exited", key, exitCode: msg.exitCode });
+  }
+  if (msg.type === "buffer") {
+    const key = sessionKey(source, msg.sessionId);
+    const trimmed = msg.ansi.split("\n").map((l) => l.replace(/ +(\x1b\[0m)?$/, "$1")).join("\n");
+    setBuffers((prev) => ({ ...prev, [key]: trimmed }));
+  }
+});
+function writeStdin(session, data) {
+  client.send(session._source, { type: "stdin", sessionId: session.sessionId, data });
+}
+function killSession(session) {
+  client.send(session._source, { type: "kill", sessionId: session.sessionId });
+}
+function launchSession(source, command, opts = {}) {
+  return client.request(source, { type: "launch", command, ...opts });
+}
+function fetchScrollback(session, lines) {
+  return client.request(session._source, { type: "scrollback", sessionId: session.sessionId, lines });
+}
+
+// src/monitor/theme.js
+var ACCENT = "#6BE795";
+var FG = "#e5e7eb";
+var FG_SOFT = "#9ca3af";
+var MUTED = "#6b7280";
+var FAINT = "#4b5563";
+var PANEL_BG = "#1e1e22";
+var SELECT_BG = "#374151";
+var RED = "#f87171";
+var AMBER = "#fbbf24";
+
+// src/monitor/index.jsx
+var KILL_ARM_MS = 3e3;
+var notify = null;
+onEvent((e) => notify?.(e));
+function timeAgo(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1e3));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+function shortCommand(command) {
+  return (command || "").replace(/\s+/g, " ").trim();
+}
+function controllableSources() {
+  return Object.keys(servers()).filter(isControllable);
+}
+function App() {
+  const [selected, setSelected] = createSignal(0);
+  const [mode, setMode] = createSignal("browse");
+  const [scrollback, setScrollback] = createSignal("");
+  const [launchTarget, setLaunchTarget] = createSignal(null);
+  const refs = createSignal({})[0]();
+  const [tick, setTick] = createSignal(0);
+  void tick();
+  useInterval(() => setTick((t) => t + 1), 5e3);
+  const toast = useToast({
+    duration: 3500,
+    position: "top-right",
+    render: (message) => /* @__PURE__ */ jsx("text", { style: { bg: ACCENT, color: "black", bold: true }, children: ` ${message} ` })
   });
-  const currentSession = () => sessions()[selected()];
+  const current = () => {
+    const list = sessions();
+    if (list.length === 0) return null;
+    return list[Math.min(selected(), list.length - 1)];
+  };
   const currentBuffer = () => {
-    const s = currentSession();
+    const s = current();
     return s ? buffers()[s._key] || "" : "";
   };
-  if (sources().length === 0) {
-    return /* @__PURE__ */ jsx("box", { style: { padding: 1 }, children: /* @__PURE__ */ jsx("text", { style: { color: DIM2 }, children: "waiting for tui-mcp server..." }) });
-  }
-  if (fullscreen()) {
-    return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", height: "100%" }, children: [
-      /* @__PURE__ */ jsx(FullscreenHeader, { session: currentSession() }),
-      /* @__PURE__ */ jsx("box", { style: { flexGrow: 1 }, children: /* @__PURE__ */ jsx(ScrollableText, { content: currentBuffer() }) })
-    ] });
-  }
-  return /* @__PURE__ */ jsxs(SplitPane, { sizes: [28, "1fr"], border: "single", borderColor: DIM2, style: { height: "100%" }, children: [
-    /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", height: "100%" }, children: [
-      /* @__PURE__ */ jsx(SessionHeader, { count: sessions().length, sources: sources() }),
-      /* @__PURE__ */ jsx(ServerBar, { sources: sources() }),
-      /* @__PURE__ */ jsx("box", { style: { flexGrow: 1 }, children: /* @__PURE__ */ jsx(
+  notify = (e) => {
+    if (e.kind === "created") toast(`\u25AA ${shortCommand(e.session.command).slice(0, 40)}`);
+    if (e.kind === "exited") {
+      const s = sessions().find((x) => x._key === e.key);
+      const cmd = shortCommand(s?.command || "").slice(0, 40);
+      toast(`${e.exitCode === 0 ? "\u2713" : "\u2717"} ${cmd} \xB7 exit ${e.exitCode}`);
+      if (mode() === "attach" && s && current()?._key === e.key) setMode("browse");
+    }
+  };
+  const requireControl = (s) => {
+    if (isControllable(s._source)) return true;
+    toast(`srv ${serverPid(s._source)} is read-only \xB7 restart it on 1.2+`);
+    return false;
+  };
+  const attach = () => {
+    const s = current();
+    if (!s) return;
+    if (s.exited) return toast("session has exited");
+    if (!requireControl(s)) return;
+    setMode("attach");
+  };
+  const openScrollback = async () => {
+    const s = current();
+    if (!s) return;
+    if (!requireControl(s)) return;
+    try {
+      const { text } = await fetchScrollback(s);
+      setScrollback(text);
+      setMode("scrollback");
+    } catch (e) {
+      toast(`scrollback failed \xB7 ${e.message}`);
+    }
+  };
+  const openLaunch = () => {
+    const candidates = controllableSources();
+    if (candidates.length === 0) return toast("no controllable servers \xB7 restart them on 1.2+");
+    const s = current();
+    const preferred = s && isControllable(s._source) ? s._source : candidates[0];
+    setLaunchTarget(preferred);
+    setMode("launch");
+  };
+  const cycleLaunchTarget = () => {
+    const candidates = controllableSources();
+    if (candidates.length < 2) return;
+    const i = candidates.indexOf(launchTarget());
+    setLaunchTarget(candidates[(i + 1) % candidates.length]);
+  };
+  const submitLaunch = async (command) => {
+    const cmd = command.trim();
+    if (!cmd) return setMode("browse");
+    try {
+      await launchSession(launchTarget(), cmd);
+      setMode("browse");
+    } catch (e) {
+      toast(`launch failed \xB7 ${e.message}`);
+    }
+  };
+  const armKill = () => {
+    const s = current();
+    if (!s) return;
+    if (!s.exited && !requireControl(s)) return;
+    const armed = refs.killArm;
+    if (!armed || armed.key !== s._key || Date.now() - armed.at > KILL_ARM_MS) {
+      refs.killArm = { key: s._key, at: Date.now() };
+      return toast(`x again to kill ${shortCommand(s.command).slice(0, 30)}`);
+    }
+    refs.killArm = null;
+    killSession(s);
+  };
+  useInput((e) => {
+    if (mode() === "attach") {
+      if (e.raw === "") return setMode("browse");
+      const s = current();
+      if (!s) return setMode("browse");
+      if (e.key === "paste") return writeStdin(s, e.text);
+      if (e.raw) writeStdin(s, e.raw);
+      return;
+    }
+    if (mode() === "launch") {
+      if (e.ctrl && e.key === "s") cycleLaunchTarget();
+      return;
+    }
+    if (mode() === "scrollback") {
+      if (e.key === "escape" || e.key === "q") setMode("browse");
+      return;
+    }
+    if (e.key === "return") attach();
+    if (e.key === "s") openScrollback();
+    if (e.key === "l") openLaunch();
+    if (e.key === "x") armKill();
+    if (e.key === "q" || e.ctrl && e.key === "c") process.exit(0);
+  });
+  if (mode() === "attach") return /* @__PURE__ */ jsx(AttachView, { session: current(), content: currentBuffer() });
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", height: "100%" }, children: [
+    /* @__PURE__ */ jsx(Header, {}),
+    /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", flexGrow: 1, paddingX: 2, gap: 2, marginTop: 1 }, children: [
+      /* @__PURE__ */ jsx("box", { style: { flexDirection: "column", width: 44 }, children: sessions().length === 0 ? /* @__PURE__ */ jsx(EmptyList, {}) : /* @__PURE__ */ jsx(
         List,
         {
           items: sessions(),
           selected: selected(),
           onSelect: setSelected,
-          renderItem: (item, { selected: sel, focused: foc }) => /* @__PURE__ */ jsx(SessionRow, { session: item, selected: sel, focused: foc })
+          focused: mode() === "browse",
+          scrolloff: 2,
+          renderItem: (item, ctx) => /* @__PURE__ */ jsx(SessionRow, { session: item, ctx })
         }
       ) }),
-      /* @__PURE__ */ jsx(StatusBar, {})
+      /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", flexGrow: 1, bg: PANEL_BG, paddingX: 1 }, children: [
+        /* @__PURE__ */ jsx(PreviewHeader, { session: current(), mode: mode() }),
+        mode() === "scrollback" ? /* @__PURE__ */ jsx(ScrollableText, { content: scrollback(), focused: true, scrollbar: true, wrap: false }) : /* @__PURE__ */ jsx(LivePreview, { session: current(), content: currentBuffer() })
+      ] })
     ] }),
-    /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", height: "100%" }, children: [
-      /* @__PURE__ */ jsx(PreviewHeader, { session: currentSession() }),
-      /* @__PURE__ */ jsx("box", { style: { flexGrow: 1 }, children: /* @__PURE__ */ jsx(ScrollableText, { content: currentBuffer() }) })
-    ] })
+    mode() === "launch" && /* @__PURE__ */ jsx(LaunchPanel, { target: launchTarget(), onSubmit: submitLaunch, onCancel: () => setMode("browse") }),
+    /* @__PURE__ */ jsx(Footer, { mode: mode() })
   ] });
 }
-function SessionHeader({ count, sources }) {
-  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 1 }, children: [
-    /* @__PURE__ */ jsx("text", { style: { color: CYAN, bold: true }, children: "sessions" }),
+function Header() {
+  const total = Object.keys(servers()).length;
+  const controllable = controllableSources().length;
+  const readOnly = total - controllable;
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 2, marginTop: 1 }, children: [
+    /* @__PURE__ */ jsx("text", { style: { color: ACCENT, bold: true }, children: "tui-mcp" }),
+    /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: " monitor" }),
     /* @__PURE__ */ jsx(Spacer, {}),
-    /* @__PURE__ */ jsxs("text", { style: { color: DIM2 }, children: [
-      count,
-      " on ",
-      sources.length
-    ] })
+    /* @__PURE__ */ jsx("text", { style: { color: FG_SOFT }, children: `${sessions().length} sessions` }),
+    /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: " \xB7 " }),
+    /* @__PURE__ */ jsx("text", { style: { color: FG_SOFT }, children: `${total} servers` }),
+    readOnly > 0 && /* @__PURE__ */ jsx("text", { style: { color: AMBER }, children: ` \xB7 ${readOnly} read-only` })
   ] });
 }
-function ServerBar({ sources }) {
-  const label = sources.length > 0 ? sources.map(sourceLabel).join(", ") : "none";
-  return /* @__PURE__ */ jsx("box", { style: { flexDirection: "row", paddingX: 1 }, children: /* @__PURE__ */ jsxs("text", { style: { color: DIM2 }, children: [
-    "servers ",
-    label
-  ] }) });
-}
-function PreviewHeader({ session }) {
-  if (!session) return /* @__PURE__ */ jsx("text", { style: { color: DIM2, paddingX: 1 }, children: "no sessions" });
-  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 1 }, children: [
-    /* @__PURE__ */ jsx("text", { style: { color: CYAN, bold: true }, children: session.command }),
-    /* @__PURE__ */ jsx(Spacer, {}),
-    /* @__PURE__ */ jsxs("text", { style: { color: DIM2 }, children: [
-      "srv ",
-      sourceLabel(session._source),
-      "  pid ",
-      session.pid,
-      "  ",
-      session.cols,
-      "x",
-      session.rows
-    ] })
+function EmptyList() {
+  const total = Object.keys(servers()).length;
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", marginTop: 1 }, children: [
+    /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: "no sessions yet" }),
+    /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: "agents create them with the launch tool" }),
+    /* @__PURE__ */ jsx("box", { style: { flexDirection: "row", marginTop: 1 }, children: total === 0 ? /* @__PURE__ */ jsx(Spinner, { color: MUTED, label: "waiting for servers..." }) : /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: `\u25AA ${total} server${total === 1 ? "" : "s"} connected` }) })
   ] });
 }
-function FullscreenHeader({ session }) {
-  if (!session) return /* @__PURE__ */ jsx("text", { style: { color: DIM2 }, children: "no sessions" });
-  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 1 }, children: [
-    /* @__PURE__ */ jsx("text", { style: { color: CYAN, bold: true }, children: session.command }),
-    /* @__PURE__ */ jsx(Spacer, {}),
-    /* @__PURE__ */ jsxs("text", { style: { color: DIM2 }, children: [
-      "srv ",
-      sourceLabel(session._source),
-      "  pid ",
-      session.pid,
-      "  ",
-      session.cols,
-      "x",
-      session.rows,
-      "  esc: back"
-    ] })
+function SessionRow({ session, ctx }) {
+  const bg = ctx.selected ? ctx.focused ? ACCENT : SELECT_BG : null;
+  const fg = ctx.selected ? "black" : null;
+  const dot = session.exited ? "\u25AB " : "\u25AA ";
+  const dotColor = fg || (session.exited ? FAINT : ACCENT);
+  const meta = [
+    `srv ${serverPid(session._source)}`,
+    isControllable(session._source) ? null : "ro",
+    timeAgo(session.createdAt)
+  ].filter(Boolean).join(" \xB7 ");
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", bg, paddingX: 1 }, children: [
+    /* @__PURE__ */ jsx("text", { style: { color: dotColor }, children: dot }),
+    /* @__PURE__ */ jsx("box", { style: { flexGrow: 1, height: 1 }, children: /* @__PURE__ */ jsx("text", { style: { overflow: "truncate", color: fg || (session.exited ? FG_SOFT : FG) }, children: shortCommand(session.command) }) }),
+    /* @__PURE__ */ jsx("text", { style: { color: fg || FAINT, dim: !ctx.selected }, children: `  ${meta}` })
   ] });
 }
-function SessionRow({ session, selected, focused }) {
-  const bg = selected ? focused ? CYAN : "gray" : null;
-  const fg = selected ? "black" : null;
-  const dot = session.exited ? "o" : "*";
-  const dotColor = selected ? "black" : session.exited ? DIM2 : CYAN;
-  const cmd = session.command.length > 18 ? session.command.slice(0, 18) + ".." : session.command;
-  const pidStr = String(session.pid).padEnd(6);
-  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 1, bg }, children: [
-    /* @__PURE__ */ jsxs("text", { style: { color: dotColor }, children: [
-      dot,
-      " "
+function PreviewHeader({ session, mode }) {
+  if (!session) return /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: "nothing selected" });
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row" }, children: [
+    /* @__PURE__ */ jsx("box", { style: { flexGrow: 1, height: 1 }, children: /* @__PURE__ */ jsx("text", { style: { overflow: "truncate", color: ACCENT, bold: true }, children: shortCommand(session.command) }) }),
+    mode === "scrollback" && /* @__PURE__ */ jsx("text", { style: { bg: ACCENT, color: "black", bold: true }, children: " scrollback " }),
+    /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: `  pid ${session.pid} \xB7 ${session.cols}x${session.rows}` }),
+    /* @__PURE__ */ jsx(SessionStatus, { session })
+  ] });
+}
+function SessionStatus({ session }) {
+  if (!session.exited) return /* @__PURE__ */ jsx("text", { style: { color: ACCENT }, children: "  \u25AA" });
+  const ok = session.exitCode === 0;
+  return /* @__PURE__ */ jsx("text", { style: { color: ok ? MUTED : RED }, children: `  ${ok ? "\u2713" : "\u2717"} exit ${session.exitCode}` });
+}
+function TailText({ content }) {
+  const rect = useLayout();
+  const lineCount = content.split("\n").length;
+  const offset = Math.max(0, lineCount - Math.max(1, rect.height || 1));
+  return /* @__PURE__ */ jsx(ScrollableText, { content, focused: false, scrollOffset: offset, wrap: false });
+}
+function LivePreview({ session, content }) {
+  if (!session) {
+    return /* @__PURE__ */ jsx("text", { style: { color: FAINT, marginTop: 1 }, children: "select a session to see its terminal" });
+  }
+  if (!content) {
+    return /* @__PURE__ */ jsx("text", { style: { color: FAINT, marginTop: 1 }, children: "no output yet" });
+  }
+  return /* @__PURE__ */ jsx(TailText, { content });
+}
+function AttachView({ session, content }) {
+  if (!session) return /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: "session is gone" });
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", height: "100%" }, children: [
+    /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 2, marginTop: 1 }, children: [
+      /* @__PURE__ */ jsx("box", { style: { flexGrow: 1, height: 1 }, children: /* @__PURE__ */ jsx("text", { style: { overflow: "truncate", color: ACCENT, bold: true }, children: shortCommand(session.command) }) }),
+      /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: `pid ${session.pid} \xB7 ${session.cols}x${session.rows}  ` }),
+      /* @__PURE__ */ jsx("text", { style: { bg: ACCENT, color: "black", bold: true }, children: " attached " })
     ] }),
-    /* @__PURE__ */ jsx("text", { style: { color: fg || DIM2 }, children: pidStr }),
-    /* @__PURE__ */ jsx("text", { style: { color: fg || "#777777" }, children: sourceLabel(session._source).padEnd(6) }),
-    /* @__PURE__ */ jsx("text", { style: { color: fg || "#aaaaaa" }, children: cmd })
+    /* @__PURE__ */ jsx("box", { style: { flexGrow: 1, bg: PANEL_BG, paddingX: 1, marginTop: 1 }, children: /* @__PURE__ */ jsx(TailText, { content }) }),
+    /* @__PURE__ */ jsx("box", { style: { flexDirection: "row", paddingX: 2, marginTop: 1 }, children: /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: "ctrl+\\ to detach \xB7 every other key passes through" }) })
   ] });
 }
-function StatusBar() {
-  return /* @__PURE__ */ jsx("box", { style: { flexDirection: "row", paddingX: 1 }, children: /* @__PURE__ */ jsx("text", { style: { color: DIM2 }, children: "j/k nav  enter fullscreen  q quit" }) });
+function LaunchPanel({ target, onSubmit, onCancel }) {
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "column", paddingX: 2, marginTop: 1 }, children: [
+    /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row" }, children: [
+      /* @__PURE__ */ jsx("text", { style: { color: ACCENT, bold: true }, children: "launch" }),
+      /* @__PURE__ */ jsx(Spacer, {}),
+      /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: `\u25AA srv ${serverPid(target)}` })
+    ] }),
+    /* @__PURE__ */ jsx("text", { style: { color: MUTED }, children: "enter to launch \xB7 ctrl+s to switch server \xB7 esc to cancel" }),
+    /* @__PURE__ */ jsx("box", { style: { bg: PANEL_BG, paddingX: 1, marginTop: 1 }, children: /* @__PURE__ */ jsx(
+      TextInput,
+      {
+        focused: true,
+        clearOnSubmit: true,
+        placeholder: "command, e.g. htop",
+        onSubmit,
+        onCancel
+      }
+    ) })
+  ] });
 }
-mount(App, { title: "tui-mcp monitor" });
+var FOOTER_HINTS = {
+  browse: "\u2191\u2193 move \xB7 enter attach \xB7 s scrollback \xB7 l launch \xB7 x kill \xB7 q quit",
+  scrollback: "\u2191\u2193 scroll \xB7 g/G top/bottom \xB7 esc back to live",
+  launch: "type a command \xB7 enter to launch \xB7 esc to cancel"
+};
+function Footer({ mode }) {
+  return /* @__PURE__ */ jsxs("box", { style: { flexDirection: "row", paddingX: 2, marginTop: 1 }, children: [
+    /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: FOOTER_HINTS[mode] || FOOTER_HINTS.browse }),
+    /* @__PURE__ */ jsx(Spacer, {}),
+    /* @__PURE__ */ jsx("text", { style: { color: FAINT }, children: "tui-mcp" })
+  ] });
+}
+mount(App, { title: "tui-mcp monitor", theme: { accent: ACCENT, muted: MUTED } });

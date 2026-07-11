@@ -6,6 +6,7 @@ import { EventEmitter } from 'events'
 
 const SOCK_DIR = path.join(os.homedir(), '.tui-mcp')
 const SCAN_MS = 2000
+const REQUEST_TIMEOUT_MS = 5000
 
 function pidFromSock(file) {
   const m = file.match(/^(\d+)\.sock$/)
@@ -19,6 +20,8 @@ function isProcessAlive(pid) {
 export function connect() {
   const emitter = new EventEmitter()
   const connections = new Map()
+  const pending = new Map()
+  let nextReqId = 1
   let destroyed = false
   let scanTimer = null
 
@@ -44,6 +47,15 @@ export function connect() {
     scanTimer = setTimeout(scanAndConnect, SCAN_MS)
   }
 
+  function settleResult(msg) {
+    const req = pending.get(msg.reqId)
+    if (!req) return
+    pending.delete(msg.reqId)
+    clearTimeout(req.timer)
+    if (msg.ok) req.resolve(msg.data)
+    else req.reject(new Error(msg.error || 'request failed'))
+  }
+
   function connectOne(sockPath) {
     let buffer = ''
     const socket = net.createConnection(sockPath)
@@ -57,6 +69,10 @@ export function connect() {
         buffer = buffer.slice(nl + 1)
         try {
           const msg = JSON.parse(line)
+          if (msg.type === 'result') {
+            settleResult(msg)
+            continue
+          }
           msg._source = sockPath
           emitter.emit('message', msg)
         } catch {}
@@ -79,9 +95,43 @@ export function connect() {
 
   scanAndConnect()
 
+  emitter.send = (source, msg) => {
+    const socket = connections.get(source)
+    if (!socket) return false
+    try { socket.write(JSON.stringify(msg) + '\n'); return true } catch { return false }
+  }
+
+  emitter.request = (source, msg) => {
+    return new Promise((resolve, reject) => {
+      const socket = connections.get(source)
+      if (!socket) return reject(new Error('server not connected'))
+
+      const reqId = nextReqId++
+      const timer = setTimeout(() => {
+        pending.delete(reqId)
+        reject(new Error('request timed out'))
+      }, REQUEST_TIMEOUT_MS)
+
+      pending.set(reqId, { resolve, reject, timer })
+
+      try {
+        socket.write(JSON.stringify({ ...msg, reqId }) + '\n')
+      } catch (e) {
+        pending.delete(reqId)
+        clearTimeout(timer)
+        reject(e)
+      }
+    })
+  }
+
   emitter.destroy = () => {
     destroyed = true
     clearTimeout(scanTimer)
+    for (const req of pending.values()) {
+      clearTimeout(req.timer)
+      req.reject(new Error('client destroyed'))
+    }
+    pending.clear()
     for (const socket of connections.values()) {
       try { socket.destroy() } catch {}
     }

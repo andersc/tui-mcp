@@ -2,9 +2,12 @@ import net from 'net'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { createRequire } from 'module'
 import * as session from './session.js'
 
 export const SOCK_DIR = path.join(os.homedir(), '.tui-mcp')
+
+const pkg = createRequire(import.meta.url)('../package.json')
 
 const clients = new Set()
 
@@ -16,7 +19,7 @@ function broadcast(msg) {
 }
 
 function sendTo(socket, msg) {
-  socket.write(JSON.stringify(msg) + '\n')
+  try { socket.write(JSON.stringify(msg) + '\n') } catch {}
 }
 
 session.events.on('created', (info) => {
@@ -42,6 +45,38 @@ session.events.on('buffer', (sessionId) => {
   } catch {}
 })
 
+const commands = {
+  stdin: ({ sessionId, data }) => session.sendText(sessionId, String(data)),
+  kill: ({ sessionId }) => session.kill(sessionId),
+  resize: ({ sessionId, cols, rows }) => session.resize(sessionId, cols, rows),
+  launch: ({ command, cols, rows, cwd }) => session.launch(command, { cols, rows, cwd }),
+  scrollback: ({ sessionId, lines }) => ({ text: session.getScrollback(sessionId, lines) }),
+}
+
+async function handleCommand(socket, msg) {
+  const run = commands[msg.type]
+  if (!run) return
+  try {
+    const data = await run(msg)
+    if (msg.reqId) sendTo(socket, { type: 'result', reqId: msg.reqId, ok: true, data })
+  } catch (e) {
+    if (msg.reqId) sendTo(socket, { type: 'result', reqId: msg.reqId, ok: false, error: e.message })
+  }
+}
+
+function readLines(socket, onLine) {
+  let buffer = ''
+  socket.on('data', (chunk) => {
+    buffer += chunk.toString()
+    let nl
+    while ((nl = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, nl)
+      buffer = buffer.slice(nl + 1)
+      if (line) onLine(line)
+    }
+  })
+}
+
 function cleanStaleSockets() {
   let files = []
   try { files = fs.readdirSync(SOCK_DIR).filter(f => f.endsWith('.sock')) } catch { return }
@@ -65,6 +100,8 @@ export function startIpc() {
   const server = net.createServer((socket) => {
     clients.add(socket)
 
+    sendTo(socket, { type: 'hello', pid: process.pid, version: pkg.version, caps: ['control'] })
+
     const sessions = session.listSessions()
     sendTo(socket, { type: 'sessions', sessions })
 
@@ -74,6 +111,10 @@ export function startIpc() {
         sendTo(socket, { type: 'buffer', sessionId: s.sessionId, ansi })
       } catch {}
     }
+
+    readLines(socket, (line) => {
+      try { handleCommand(socket, JSON.parse(line)) } catch {}
+    })
 
     socket.on('close', () => clients.delete(socket))
     socket.on('error', () => clients.delete(socket))
