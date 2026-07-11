@@ -1,8 +1,22 @@
 import {
-  mount, createSignal, createEffect, onCleanup,
+  mount, createSignal,
   useInput, List, ScrollableText, SplitPane, Spacer,
 } from '@trendr/core'
 import { connect } from './client.js'
+
+// components re-render on every state change, so the ipc client must live at
+// module scope - creating it per render leaks 13 sockets per frame and fills
+// the kernel file table within minutes
+let client = null
+const wire = { onMessage: null, onConnected: null, onLost: null }
+
+function ensureClient() {
+  if (client) return
+  client = connect()
+  client.on('message', (m) => wire.onMessage?.(m))
+  client.on('connected', (s) => wire.onConnected?.(s))
+  client.on('server_lost', (s) => wire.onLost?.(s))
+}
 
 const CYAN = '#00bcd4'
 const DIM = '#555555'
@@ -41,65 +55,61 @@ function App() {
     setSources(prev => prev.filter(s => s !== src))
   }
 
-  createEffect(() => {
-    const client = connect()
+  ensureClient()
 
-    client.on('message', (msg) => {
-      const src = msg._source
-      rememberSource(src)
+  wire.onMessage = (msg) => {
+    const src = msg._source
+    rememberSource(src)
 
-      if (msg.type === 'sessions') {
-        setSessions(prev => {
-          const other = prev.filter(s => s._source !== src)
-          const incoming = msg.sessions.map(s => ({ ...s, _source: src, _key: sessionKey(src, s.sessionId) }))
-          return sortByPid([...other, ...incoming])
-        })
-      }
+    if (msg.type === 'sessions') {
+      setSessions(prev => {
+        const other = prev.filter(s => s._source !== src)
+        const incoming = msg.sessions.map(s => ({ ...s, _source: src, _key: sessionKey(src, s.sessionId) }))
+        return sortByPid([...other, ...incoming])
+      })
+    }
 
-      if (msg.type === 'created') {
-        const s = { ...msg.session, _source: src, _key: sessionKey(src, msg.session.sessionId) }
-        setSessions(prev => upsertSession(prev, s))
-      }
+    if (msg.type === 'created') {
+      const s = { ...msg.session, _source: src, _key: sessionKey(src, msg.session.sessionId) }
+      setSessions(prev => upsertSession(prev, s))
+    }
 
-      if (msg.type === 'killed') {
-        const key = sessionKey(src, msg.sessionId)
-        setSessions(prev => prev.filter(s => s._key !== key))
-        setBuffers(prev => {
-          const next = { ...prev }
-          delete next[key]
-          return next
-        })
-      }
-
-      if (msg.type === 'exited') {
-        const key = sessionKey(src, msg.sessionId)
-        setSessions(prev => prev.map(s =>
-          s._key === key ? { ...s, exited: true, exitCode: msg.exitCode } : s
-        ))
-      }
-
-      if (msg.type === 'buffer') {
-        const key = sessionKey(src, msg.sessionId)
-        setBuffers(prev => ({ ...prev, [key]: msg.ansi }))
-      }
-    })
-
-    client.on('connected', (src) => rememberSource(src))
-
-    client.on('server_lost', (src) => {
-      forgetSource(src)
-      setSessions(prev => prev.filter(s => s._source !== src))
+    if (msg.type === 'killed') {
+      const key = sessionKey(src, msg.sessionId)
+      setSessions(prev => prev.filter(s => s._key !== key))
       setBuffers(prev => {
         const next = { ...prev }
-        for (const k of Object.keys(next)) {
-          if (k.startsWith(src + ':')) delete next[k]
-        }
+        delete next[key]
         return next
       })
-    })
+    }
 
-    onCleanup(() => client.destroy())
-  })
+    if (msg.type === 'exited') {
+      const key = sessionKey(src, msg.sessionId)
+      setSessions(prev => prev.map(s =>
+        s._key === key ? { ...s, exited: true, exitCode: msg.exitCode } : s
+      ))
+    }
+
+    if (msg.type === 'buffer') {
+      const key = sessionKey(src, msg.sessionId)
+      setBuffers(prev => ({ ...prev, [key]: msg.ansi }))
+    }
+  }
+
+  wire.onConnected = rememberSource
+
+  wire.onLost = (src) => {
+    forgetSource(src)
+    setSessions(prev => prev.filter(s => s._source !== src))
+    setBuffers(prev => {
+      const next = { ...prev }
+      for (const k of Object.keys(next)) {
+        if (k.startsWith(src + ':')) delete next[k]
+      }
+      return next
+    })
+  }
 
   useInput(({ key }) => {
     if (key === 'q') process.exit(0)

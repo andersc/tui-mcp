@@ -559,26 +559,6 @@ function createSignal(value) {
   }
   return createSignalRaw(value);
 }
-function createEffect(fn) {
-  const effect = {
-    fn,
-    cleanup: null,
-    run() {
-      if (effect.cleanup) effect.cleanup();
-      const prev = currentEffect;
-      currentEffect = effect;
-      try {
-        const result = fn();
-        effect.cleanup = typeof result === "function" ? result : null;
-      } finally {
-        currentEffect = prev;
-      }
-    }
-  };
-  effect.run();
-  if (currentScope) currentScope.effects.push(effect);
-  return effect;
-}
 function onCleanup(fn) {
   if (currentScope) currentScope.cleanups.push(fn);
   else if (currentEffect) {
@@ -2171,6 +2151,15 @@ function connect() {
 }
 
 // src/monitor/index.jsx
+var client = null;
+var wire = { onMessage: null, onConnected: null, onLost: null };
+function ensureClient() {
+  if (client) return;
+  client = connect();
+  client.on("message", (m) => wire.onMessage?.(m));
+  client.on("connected", (s) => wire.onConnected?.(s));
+  client.on("server_lost", (s) => wire.onLost?.(s));
+}
 var CYAN = "#00bcd4";
 var DIM2 = "#555555";
 function sessionKey(source, sessionId) {
@@ -2200,56 +2189,53 @@ function App() {
   const forgetSource = (src) => {
     setSources((prev) => prev.filter((s) => s !== src));
   };
-  createEffect(() => {
-    const client = connect();
-    client.on("message", (msg) => {
-      const src = msg._source;
-      rememberSource(src);
-      if (msg.type === "sessions") {
-        setSessions((prev) => {
-          const other = prev.filter((s) => s._source !== src);
-          const incoming = msg.sessions.map((s) => ({ ...s, _source: src, _key: sessionKey(src, s.sessionId) }));
-          return sortByPid([...other, ...incoming]);
-        });
-      }
-      if (msg.type === "created") {
-        const s = { ...msg.session, _source: src, _key: sessionKey(src, msg.session.sessionId) };
-        setSessions((prev) => upsertSession(prev, s));
-      }
-      if (msg.type === "killed") {
-        const key = sessionKey(src, msg.sessionId);
-        setSessions((prev) => prev.filter((s) => s._key !== key));
-        setBuffers((prev) => {
-          const next = { ...prev };
-          delete next[key];
-          return next;
-        });
-      }
-      if (msg.type === "exited") {
-        const key = sessionKey(src, msg.sessionId);
-        setSessions((prev) => prev.map(
-          (s) => s._key === key ? { ...s, exited: true, exitCode: msg.exitCode } : s
-        ));
-      }
-      if (msg.type === "buffer") {
-        const key = sessionKey(src, msg.sessionId);
-        setBuffers((prev) => ({ ...prev, [key]: msg.ansi }));
-      }
-    });
-    client.on("connected", (src) => rememberSource(src));
-    client.on("server_lost", (src) => {
-      forgetSource(src);
-      setSessions((prev) => prev.filter((s) => s._source !== src));
+  ensureClient();
+  wire.onMessage = (msg) => {
+    const src = msg._source;
+    rememberSource(src);
+    if (msg.type === "sessions") {
+      setSessions((prev) => {
+        const other = prev.filter((s) => s._source !== src);
+        const incoming = msg.sessions.map((s) => ({ ...s, _source: src, _key: sessionKey(src, s.sessionId) }));
+        return sortByPid([...other, ...incoming]);
+      });
+    }
+    if (msg.type === "created") {
+      const s = { ...msg.session, _source: src, _key: sessionKey(src, msg.session.sessionId) };
+      setSessions((prev) => upsertSession(prev, s));
+    }
+    if (msg.type === "killed") {
+      const key = sessionKey(src, msg.sessionId);
+      setSessions((prev) => prev.filter((s) => s._key !== key));
       setBuffers((prev) => {
         const next = { ...prev };
-        for (const k of Object.keys(next)) {
-          if (k.startsWith(src + ":")) delete next[k];
-        }
+        delete next[key];
         return next;
       });
+    }
+    if (msg.type === "exited") {
+      const key = sessionKey(src, msg.sessionId);
+      setSessions((prev) => prev.map(
+        (s) => s._key === key ? { ...s, exited: true, exitCode: msg.exitCode } : s
+      ));
+    }
+    if (msg.type === "buffer") {
+      const key = sessionKey(src, msg.sessionId);
+      setBuffers((prev) => ({ ...prev, [key]: msg.ansi }));
+    }
+  };
+  wire.onConnected = rememberSource;
+  wire.onLost = (src) => {
+    forgetSource(src);
+    setSessions((prev) => prev.filter((s) => s._source !== src));
+    setBuffers((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) {
+        if (k.startsWith(src + ":")) delete next[k];
+      }
+      return next;
     });
-    onCleanup(() => client.destroy());
-  });
+  };
   useInput(({ key }) => {
     if (key === "q") process.exit(0);
     if (key === "return") setFullscreen((f) => !f);
