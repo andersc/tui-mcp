@@ -126,8 +126,16 @@ export function startIpc() {
 
   server.listen(sockPath)
 
-  process.on('exit', () => {
+  const cleanup = () => {
     try { fs.unlinkSync(sockPath) } catch {}
+  }
+  server.on('close', cleanup)
+  process.on('exit', cleanup)
+
+  server.shutdown = () => new Promise((resolve) => {
+    for (const socket of clients) socket.destroy()
+    clients.clear()
+    server.close(resolve)
   })
 
   return server

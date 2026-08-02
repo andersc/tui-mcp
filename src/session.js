@@ -53,15 +53,15 @@ function dispose(s) {
   try { s.term.dispose() } catch {}
 }
 
-function killAll() {
+export function closeAll() {
   for (const s of sessions.values()) dispose(s)
   sessions.clear()
 }
 
-process.on('SIGTERM', () => { killAll(); process.exit(143) })
-process.on('SIGINT', () => { killAll(); process.exit(130) })
-process.on('SIGHUP', () => { killAll(); process.exit(129) })
-process.on('exit', killAll)
+process.on('SIGTERM', () => { closeAll(); process.exit(143) })
+process.on('SIGINT', () => { closeAll(); process.exit(130) })
+process.on('SIGHUP', () => { closeAll(); process.exit(129) })
+process.on('exit', closeAll)
 
 const REAP_DELAY = 5 * 60 * 1000
 const RAW_HEAD_CAP = 64 * 1024

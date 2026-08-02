@@ -17,7 +17,7 @@ import { z } from 'zod'
 import * as session from './session.js'
 import { startIpc } from './ipc.js'
 
-startIpc()
+const ipcServer = startIpc()
 
 const pkg = createRequire(import.meta.url)('../package.json')
 
@@ -252,4 +252,19 @@ server.registerTool('wait_for_exit', {
 })
 
 const transport = new StdioServerTransport()
+let shuttingDown = false
+
+async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
+  session.closeAll()
+  await ipcServer.shutdown()
+}
+
+transport.onclose = () => {
+  shutdown().catch(() => process.exitCode = 1)
+}
+process.stdin.on('end', () => transport.close())
+process.stdin.on('close', () => transport.close())
+
 await server.connect(transport)
