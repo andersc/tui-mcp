@@ -199,7 +199,7 @@ server.registerTool('send_mouse', {
   description: 'Send a mouse event to the TUI app (if the app has mouse support enabled).',
   inputSchema: {
     sessionId: z.string().describe('Session ID'),
-    action: z.enum(['press', 'release', 'scroll']).describe('Mouse action type'),
+    action: z.enum(['press', 'release', 'scroll', 'move', 'drag']).describe('Mouse action type: move = pointer motion with no button held (hover), drag = motion with a button held'),
     x: z.number().describe('Column position (0-based)'),
     y: z.number().describe('Row position (0-based)'),
     button: z.string().optional().describe('Mouse button: "left", "middle", "right" for press/release; "up", "down" for scroll (default: "left")'),
