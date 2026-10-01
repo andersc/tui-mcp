@@ -112,6 +112,16 @@ export function launch(command, { cols = 80, rows = 24, cwd, env } = {}) {
     _reapTimer: null,
   }
 
+  // The emulator answers terminal queries (cursor position, device
+  // attributes, colour queries) through onData. Without passing those replies
+  // back to the program, an app that probes the terminal waits for an answer
+  // that never comes.
+  term.onData((reply) => {
+    if (!session.exited) {
+      try { p.write(reply) } catch {}
+    }
+  })
+
   p.onData((data) => {
     term.write(data)
 

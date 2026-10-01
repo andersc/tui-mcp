@@ -107,3 +107,24 @@ test('kill removes the session', async () => {
   assert.equal(session.listSessions().find(s => s.sessionId === sessionId), undefined)
   assert.throws(() => session.snapshot(sessionId), /no session/)
 })
+
+test('terminal queries are answered', async () => {
+  // Asks for the cursor position (DSR 6) and prints what came back. Before
+  // replies were wired to the pty, read timed out and printed NONE.
+  const { sessionId } = await launch(
+    `python3 -c "
+import os, sys, tty, termios, select
+fd = sys.stdin.fileno(); old = termios.tcgetattr(fd); tty.setraw(fd)
+try:
+    os.write(1, b'\\x1b[6n')
+    r = select.select([fd], [], [], 2)[0]
+    got = os.read(fd, 32) if r else b''
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+print('REPLY ' + (repr(got) if got else 'NONE'))
+"; sleep 30`,
+    { cols: 60, rows: 10 }
+  )
+  await session.waitForText(sessionId, 'REPLY', 5000)
+  assert.match(session.snapshot(sessionId), /REPLY b'\\x1b\[\d+;\d+R'/)
+})
