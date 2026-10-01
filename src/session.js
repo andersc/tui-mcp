@@ -237,6 +237,15 @@ export function resize(sessionId, cols, rows) {
   s.rows = rows
 }
 
+// xterm parses writes asynchronously, so bytes the program has already
+// written may not be on the screen yet. Resolves once everything written so
+// far has been parsed; read tools await it, or a read right after output can
+// return the screen from before it.
+export function settled(sessionId) {
+  const s = get(sessionId)
+  return new Promise((resolve) => s.term.write('', resolve))
+}
+
 export async function screenshot(sessionId) {
   const s = get(sessionId)
   return renderToPng(s.term)
