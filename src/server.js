@@ -202,7 +202,7 @@ server.registerTool('send_mouse', {
     action: z.enum(['press', 'release', 'scroll', 'move', 'drag']).describe('Mouse action type: move = pointer motion with no button held (hover), drag = motion with a button held'),
     x: z.number().describe('Column position (0-based)'),
     y: z.number().describe('Row position (0-based)'),
-    button: z.string().optional().describe('Mouse button: "left", "middle", "right" for press/release; "up", "down" for scroll (default: "left")'),
+    button: z.string().optional().describe('Mouse button: "left", "middle", "right" for press/release/drag; "up", "down" for scroll (default: "left")'),
   },
 }, async ({ sessionId, action, x, y, button }) => {
   session.sendMouse(sessionId, action, x, y, button)
